@@ -118,6 +118,21 @@ module Scenic
         execute "DROP VIEW #{quote_table_name(name)};"
       end
 
+      # Renames a view in the database
+      #
+      # This is typically called in a migration via {Statements#rename_view}.
+      #
+      # @param from_name The previous name of the view to rename.
+      # @param to_name The next name of the view to rename.
+      #
+      # @return [void]
+      def rename_view(from_name, to_name)
+        execute <<~SQL
+          ALTER VIEW #{quote_table_name(from_name)}
+          RENAME TO #{quote_table_name(to_name)};
+        SQL
+      end
+
       # Creates a materialized view in the database
       #
       # @param name The name of the materialized view to create
@@ -125,6 +140,9 @@ module Scenic
       # @param no_data [Boolean] Default: false. Set to true to create
       #   materialized view without running the associated query. You will need
       #   to perform a non-concurrent refresh to populate with data.
+      # @param copy_indexes_from [String] Default: false. Name of another view
+      #   to copy indexes from. Useful when used as a first step before
+      #   `replace_materialized_view`.
       #
       # This is typically called in a migration via {Statements#create_view}.
       #
@@ -132,14 +150,21 @@ module Scenic
       #   in use does not support materialized views.
       #
       # @return [void]
-      def create_materialized_view(name, sql_definition, no_data: false)
+      def create_materialized_view(
+        name, sql_definition,
+        no_data: false, copy_indexes_from: false
+      )
         raise_unless_materialized_views_supported
 
-        execute <<-SQL
-  CREATE MATERIALIZED VIEW #{quote_table_name(name)} AS
-  #{sql_definition.rstrip.chomp(';')}
-  #{'WITH NO DATA' if no_data};
+        execute <<~SQL
+          CREATE MATERIALIZED VIEW #{quote_table_name(name)} AS
+          #{sql_definition.rstrip.chomp(';')}
+          #{'WITH NO DATA' if no_data};
         SQL
+        if copy_indexes_from
+          IndexReapplication.new(connection: connection)
+            .on(name, from: copy_indexes_from) {}
+        end
       end
 
       # Updates a materialized view in the database.
@@ -169,6 +194,26 @@ module Scenic
         end
       end
 
+      # Replaces a materialized view by another.
+      #
+      # Most of the time this method is used as a second step after having
+      # created the materialized view and refreshing it in a previous release.
+      #
+      # This is typically called in a migration via {Statements#replace_view}.
+      #
+      # @param from_name The previous name of the materialized view to rename.
+      # @param to_name The next name of the materialized view to rename.
+      # @raise [MaterializedViewsNotSupportedError] if the version of Postgres
+      #   in use does not support materialized views.
+      #
+      # @return [void]
+      def replace_materialized_view(from_name, to_name)
+        raise_unless_materialized_views_supported
+
+        drop_materialized_view(to_name)
+        rename_materialized_view(from_name, to_name, rename_indexes: true)
+      end
+
       # Drops a materialized view in the database
       #
       # This is typically called in a migration via {Statements#update_view}.
@@ -181,6 +226,39 @@ module Scenic
       def drop_materialized_view(name)
         raise_unless_materialized_views_supported
         execute "DROP MATERIALIZED VIEW #{quote_table_name(name)};"
+      end
+
+      # Renames a materialized view in the database
+      #
+      # This is typically called in a migration via {Statements#rename_view}.
+      #
+      # @param from_name The previous name of the materialized view to rename.
+      # @param to_name The next name of the materialized view to rename.
+      # @param rename_indexes [Boolean] rename materialized view indexes
+      #   by substituing in their name the previous view name
+      #   to the next view name. Defaults to false.
+      # @raise [MaterializedViewsNotSupportedError] if the version of Postgres
+      #   in use does not support materialized views.
+      #
+      # @return [void]
+      def rename_materialized_view(from_name, to_name, rename_indexes: false)
+        raise_unless_materialized_views_supported
+        execute <<~SQL
+          ALTER MATERIALIZED VIEW #{quote_table_name(from_name)}
+          RENAME TO #{quote_table_name(to_name)};
+        SQL
+
+        if rename_indexes
+          Indexes.new(connection: connection)
+            .on(to_name)
+            .map(&:index_name)
+            .select { |name| name.match?(from_name) }
+            .each do |name|
+              connection.rename_index(
+                to_name, name, name.to_s.sub(from_name.to_s, to_name.to_s)
+              )
+            end
+        end
       end
 
       # Refreshes a materialized view from its SQL schema.
@@ -222,10 +300,54 @@ module Scenic
         end
       end
 
+      # Returns a normalized SQL query
+      #
+      # Used to compare two queries.
+      #
+      # @param name [String] SQL `SELECT` query.
+      #
+      # @return [String]
+      def normalize_sql(sql_definition)
+        temporary_view_name = "temp_view_for_normalization"
+        view_name = quote_table_name(temporary_view_name)
+        transaction do
+          execute "CREATE TEMPORARY VIEW #{view_name} AS #{sql_definition};"
+          view = normalize_view_sql(temporary_view_name)
+          execute "DROP VIEW IF EXISTS #{view_name};"
+          view
+        end
+      end
+
+      # Returns a normalized SQL definition of a view
+      #
+      # Used to compare two queries.
+      #
+      # @param name [String] view name.
+      #
+      # @return [String]
+      def normalize_view_sql(name)
+        select_value("SELECT pg_get_viewdef(to_regclass(#{quote(name)}))")
+          .try(:strip)
+      end
+
+      # Compare the SQL definition of the view stored in the database
+      #   with the definition used to create the migrations.
+      #
+      # @param definition [Scenic::Definition] view definition to compare
+      #   with the database.
+      #
+      # @return [Boolean]
+      def view_with_similar_definition?(definition)
+        normalize_view_sql(definition.name) == normalize_sql(definition.to_sql)
+      end
+
       private
 
       attr_reader :connectable
-      delegate :execute, :quote_table_name, to: :connection
+      delegate(
+        :execute, :quote, :quote_table_name, :select_value, :transaction,
+        to: :connection
+      )
 
       def connection
         Connection.new(connectable.connection)

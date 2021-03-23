@@ -30,10 +30,24 @@ describe Scenic::Generators::ViewGenerator, :generator do
       allow(Dir).to receive(:entries).and_return(["aired_episodes_v01.sql"])
 
       run_generator ["aired_episode", "--materialized"]
+
       migration = migration_file(
         "db/migrate/update_aired_episodes_to_version_2.rb",
       )
       expect(migration).to contain "materialized: true"
+    end
+  end
+
+  it "use 'rename_view' to the migration if view is materialized" do
+    with_view_definition("searches", 1, "hello") do
+      allow(Dir).to receive(:entries).and_return(["searches_v01.sql"])
+
+      run_generator ["new_search", "--rename", "search"]
+
+      migration = migration_file(
+        "db/migrate/update_new_searches_to_version_1.rb",
+      )
+      expect(migration).to contain "rename_view :searches, :new_searches,"
     end
   end
 

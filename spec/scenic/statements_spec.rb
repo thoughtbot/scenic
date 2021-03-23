@@ -58,7 +58,12 @@ module Scenic
         connection.create_view(:views, version: 1, materialized: true)
 
         expect(Scenic.database).to have_received(:create_materialized_view)
-          .with(:views, definition.to_sql, no_data: false)
+          .with(
+            :views,
+            definition.to_sql,
+            no_data: false,
+            copy_indexes_from: false,
+          )
       end
     end
 
@@ -74,7 +79,52 @@ module Scenic
         )
 
         expect(Scenic.database).to have_received(:create_materialized_view)
-          .with(:views, definition.to_sql, no_data: true)
+          .with(
+            :views, definition.to_sql,
+            no_data: true, copy_indexes_from: false
+          )
+      end
+    end
+
+    describe "create_view :materialized and copy indexes" do
+      it "sends the create_materialized_view message" do
+        definition = instance_double("Scenic::Definition", to_sql: "definition")
+        allow(Definition).to receive(:new).and_return(definition)
+
+        connection.create_view(
+          :views,
+          version: 1,
+          materialized: { copy_indexes_from: :other_views },
+        )
+
+        expect(Scenic.database).to have_received(:create_materialized_view)
+          .with(
+            :views,
+            definition.to_sql,
+            no_data: false,
+            copy_indexes_from: :other_views,
+          )
+      end
+    end
+
+    describe "create_view :materialized with :no_data and copy indexes" do
+      it "sends the create_materialized_view message" do
+        definition = instance_double("Scenic::Definition", to_sql: "definition")
+        allow(Definition).to receive(:new).and_return(definition)
+
+        connection.create_view(
+          :views,
+          version: 1,
+          materialized: { no_data: true, copy_indexes_from: :other_views },
+        )
+
+        expect(Scenic.database).to have_received(:create_materialized_view)
+          .with(
+            :views,
+            definition.to_sql,
+            no_data: true,
+            copy_indexes_from: :other_views,
+          )
       end
     end
 
@@ -175,20 +225,75 @@ module Scenic
           .with(:name, definition.to_sql)
       end
 
-      it "fails to replace the materialized view in the database" do
+      it "replace the materialized view in the database" do
         definition = instance_double("Definition", to_sql: "definition")
         allow(Definition).to receive(:new)
-          .with(:name, 3)
+          .with(:to_name, 3)
           .and_return(definition)
 
-        expect do
-          connection.replace_view(:name, version: 3, materialized: true)
-        end.to raise_error(ArgumentError, /Cannot replace materialized views/)
+        connection.replace_view(:name, :to_name, version: 3, materialized: true)
+        expect(Scenic.database).to have_received(:replace_materialized_view)
+          .with(:name, :to_name)
+      end
+
+      it "raise an error if replace the materialized view without new name" do
+        definition = instance_double("Definition", to_sql: "definition")
+        allow(Definition).to receive(:new)
+          .with(:to, 3)
+          .and_return(definition)
+
+        expect { connection.replace_view(:to, version: 3, materialized: true) }
+          .to raise_error(ArgumentError, /to_name is required/)
       end
 
       it "raises an error if not supplied a version" do
         expect { connection.replace_view :views }
           .to raise_error(ArgumentError, /version is required/)
+      end
+    end
+
+    describe "rename_view" do
+      it "rename the view in the database" do
+        connection.rename_view(:from, :to, version: 1)
+
+        expect(Scenic.database).to have_received(:rename_view)
+          .with(:from, :to)
+      end
+
+      it "rename the materialized view in the database" do
+        connection.rename_view(
+          :from, :to,
+          version: 1, materialized: true
+        )
+
+        expect(Scenic.database).to have_received(:rename_materialized_view)
+          .with(:from, :to, rename_indexes: false)
+      end
+
+      it "rename the materialized view in the database and rename indexes" do
+        connection.rename_view(
+          :from, :to,
+          version: 1, materialized: { rename_indexes: true }
+        )
+
+        expect(Scenic.database).to have_received(:rename_materialized_view)
+          .with(:from, :to, rename_indexes: true)
+      end
+
+      it "raises an error if no version supplied" do
+        expect { connection.rename_view(:from, :to) }
+          .to raise_error(ArgumentError, /version is required/)
+      end
+
+      it "raises an error if the definition is different from the database" do
+        adapter = instance_double(
+          "Scenic::Adapters::Postgres",
+          "view_with_similar_definition?" => false,
+        ).as_null_object
+        allow(Scenic).to receive(:database).and_return(adapter)
+
+        expect { connection.rename_view(:from, :to, version: 1) }
+          .to raise_error(StoredDefinitionError)
       end
     end
 

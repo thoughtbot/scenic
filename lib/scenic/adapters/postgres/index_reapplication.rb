@@ -27,12 +27,14 @@ module Scenic
         # @yield Operations to perform before reapplying indexes.
         #
         # @return [void]
-        def on(name)
-          indexes = Indexes.new(connection: connection).on(name)
+        def on(name, from: name)
+          indexes = Indexes.new(connection: connection).on(from)
 
           yield
 
-          indexes.each(&method(:try_index_create))
+          indexes
+            .map(&method(:change_index_object_name).curry[from, name])
+            .each(&method(:try_index_create))
         end
 
         private
@@ -49,6 +51,20 @@ module Scenic
           else
             say "index '#{index.index_name}' on '#{index.object_name}' is no longer valid and has been dropped."
           end
+        end
+
+        def change_index_object_name(from, to, index)
+          return index if from == to
+          index_name = index.index_name.to_s.sub(from.to_s, to.to_s)
+
+          Scenic::Index.new(
+            object_name: to,
+            index_name: index_name,
+            definition: index.definition.sub(
+              /#{index.index_name} ON (\w+\.)?#{from}/,
+              "#{index_name} ON \\1#{to}",
+            ),
+          )
         end
 
         def with_savepoint(name)

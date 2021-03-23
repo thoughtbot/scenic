@@ -55,6 +55,31 @@ describe "User manages views" do
     successfully "rails destroy scenic:model search_results --materialized"
   end
 
+  it "handle replacing materialized views" do
+    successfully "rails generate scenic:model greeting --materialized"
+    write_definition "greetings_v01", "SELECT text 'hi' AS hello"
+
+    successfully "rake db:migrate"
+    verify_result "Greeting.take.hello", "hi"
+
+    successfully "rails generate scenic:view greeting_next --materialized"
+    write_definition "greeting_nexts_v01", "SELECT text 'welcome' AS hello"
+
+    successfully "rake db:migrate"
+    verify_result "Greeting.take.hello", "hi"
+
+    successfully "rails runner 'Scenic.database.refresh_materialized_view(:greeting_nexts)'"
+
+    successfully "rails generate scenic:view greeting --materialized --rename greeting_next"
+    verify_identical_view_definitions "greeting_nexts_v01", "greetings_v02"
+    replace_into_migration "update_greetings_to_version_2", "rename_view", "replace_view"
+
+    successfully "rake db:migrate"
+    verify_result "Greeting.take.hello", "welcome"
+
+    successfully "rails destroy scenic:model greeting"
+  end
+
   def successfully(command)
     `RAILS_ENV=test #{command}`
     expect($CHILD_STATUS.exitstatus).to eq(0), "'#{command}' was unsuccessful"
@@ -84,5 +109,13 @@ describe "User manages views" do
   def verify_schema_contains(statement)
     expect(File.readlines("db/schema.rb").grep(/#{statement}/))
       .not_to be_empty, "Schema does not contain '#{statement}'"
+  end
+
+  def replace_into_migration(name, pattern, replacement)
+    filename = Dir.glob("db/migrate/[0-9]*_#{name}.rb").first
+
+    content = File.read(filename).gsub(pattern, replacement)
+
+    File.write(filename, content)
   end
 end

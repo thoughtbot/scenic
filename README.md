@@ -195,6 +195,78 @@ you would need to refresh view B first, then right after refresh view A. If you
 would like this cascading refresh of materialized views, set `cascade: true`
 when you refresh your materialized view.
 
+## I made a mistake and I need to rename a view?
+
+Run the view generator as following:
+
+```sh
+$ rails generate scenic:view results --rename search_results
+      create  db/views/results_v01.sql
+      create  db/migrate/[TIMESTAMP]_update_results_to_version_2.rb
+```
+
+Now, `db/views/results_v01.sql` sould be identical to 
+`db/views/search_results_v01.sql`, you will need to edit this file if you rename
+another views in this migration that is in this definition, so just rename it
+too accordingly ;-)
+The migration should look something like this:
+
+```ruby
+class UpdateResultsToVersion2 < ActiveRecord::Migration
+  def change
+    rename_view :search_results, :results,
+      version: 2,
+      revert_to_version: 1
+  end
+end
+```
+
+## Need to change a materialized view without downtime?
+
+Before using `replace_view` on materialized views, you need to create and
+populate the next version of the view in a previous release. So you will have
+to follow these steps:
+
+1. Create a new materialized view
+   `rails generate scenic:view table_names_next --materialized --no-data`
+   that will take improvement of your future view `table_namse`. you can
+   copy-paste the content of the last version of `table_names` as a starter
+   and you can also add the option `copy_indexes_from: :table_names` to easily add
+   all indexes of `table_names`.
+   ```ruby
+   def change
+     create_view :table_names_nexts,
+       version: 1,
+       materialized: { no_data: true, copy_indexes_from: :table_names }
+   end
+   ```
+2. Deploy and apply this migration
+3. Refresh the view within a task or in the Rails console
+   `Scenic.database.refresh_materialized_view(:table_names_nexts, concurrently: false)`
+4. Use that view by removing the previous and renaming the next one in a single
+   migration 
+   `rails generate scenic:view table_names --materialized --rename table_names_next`
+   and edit the migration to change `rename_view` by `replace_view`:
+   ```ruby
+   def change
+     replace_view :table_names_nexts, :table_names,
+       version: 1,
+       revert_to_version: 1,
+       materialized: true
+   end
+   ```
+
+`replace_view` will internaly do:
+```ruby
+drop_view(:table_names, revert_to_version: 1, materialized: true)
+rename_view(
+  :table_names_nexts, :table_names,
+  version: 1, revert_to_version: 1, materialized: { rename_indexes: true }
+)
+```
+So you can use this last version if you need to perform some operations between
+the drop and the rename.
+
 ## I don't need this view anymore. Make it go away.
 
 Scenic gives you `drop_view` too:
